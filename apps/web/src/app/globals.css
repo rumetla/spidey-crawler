@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #0a0a0a;
+  --color-surface-raised: #111111;
+  --color-border: #262626;
+  --color-border-bright: #404040;
+  --color-text-primary: #e5e5e5;
+  --color-text-muted: #737373;
+  --color-accent: #00ff00;
+  --color-accent-dim: #00aa00;
+  --color-danger: #ef4444;
+  --color-warn: #f59e0b;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+}
+
+/* Scrollbar styling for operator aesthetic */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-bright);
+}

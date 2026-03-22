@@ -1,0 +1,14 @@
+{
+  "name": "spidey-crawler",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:api": "pnpm --filter @spidey/api dev",
+    "dev:web": "pnpm --filter @spidey/web dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
