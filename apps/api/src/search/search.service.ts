@@ -22,4 +22,8 @@ export class SearchService {
       title: row.title ?? '',
     }));
   }
+
+  searchByRelevance(query: string, limit = 20) {
+    return this.db.searchByRelevance(query, limit);
+  }
 }

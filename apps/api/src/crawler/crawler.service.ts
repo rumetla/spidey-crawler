@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Worker } from 'worker_threads';
 import * as path from 'path';
+import * as fs from 'fs';
 import { DatabaseService } from '../database/database.service';
 import { SSEService } from '../sse/sse.service';
 import {
@@ -101,6 +102,7 @@ export class CrawlerService implements OnModuleInit {
         if (batch.length === 0) {
           if (activeWorkerCount === 0) {
             this.db.updateJobStatus(job.id, JobStatus.Completed);
+            this.exportPData();
             this.sse.log('info', `Job #${job.id} completed`);
             this.sse.emit('job_status', { jobId: job.id, status: 'completed' });
             this.cleanupJob(job.id);
@@ -215,8 +217,10 @@ export class CrawlerService implements OnModuleInit {
     job: JobRow,
     activeWorkers: number,
   ): void {
-    const currentQueueDepth = this.db.getQueueDepth(job.id);
-    if (currentQueueDepth > job.max_queue_size) {
+    let currentQueueDepth = this.db.getQueueDepth(job.id);
+    const throttled = currentQueueDepth >= job.max_queue_size;
+
+    if (throttled) {
       this.sse.emit('backpressure', {
         isThrottled: true,
         queueDepth: currentQueueDepth,
@@ -224,7 +228,6 @@ export class CrawlerService implements OnModuleInit {
         activeWorkers,
         maxWorkers: job.max_workers,
       });
-      return;
     }
 
     let originDomain: string | undefined;
@@ -239,6 +242,8 @@ export class CrawlerService implements OnModuleInit {
 
     let enqueued = 0;
     for (const link of links) {
+      if (currentQueueDepth + enqueued >= job.max_queue_size) break;
+
       if (originDomain) {
         try {
           if (this.extractRootDomain(new URL(link).hostname) !== originDomain) continue;
@@ -342,5 +347,20 @@ export class CrawlerService implements OnModuleInit {
 
   getJob(jobId: number): JobRow | undefined {
     return this.db.getJob(jobId);
+  }
+
+  private exportPData(): void {
+    try {
+      const rows = this.db.exportTermsFlat();
+      const dir = path.resolve(process.cwd(), 'data', 'storage');
+      fs.mkdirSync(dir, { recursive: true });
+      const lines = rows.map(
+        (r) => `${r.term} ${r.url} ${r.origin_url} ${r.depth} ${r.frequency}`,
+      );
+      fs.writeFileSync(path.join(dir, 'p.data'), lines.join('\n'), 'utf-8');
+      this.logger.log(`Exported ${rows.length} entries to data/storage/p.data`);
+    } catch (err) {
+      this.logger.error(`Failed to export p.data: ${err}`);
+    }
   }
 }

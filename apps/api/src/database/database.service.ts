@@ -265,6 +265,94 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return rows;
   }
 
+  /**
+   * Assignment scoring: (frequency * 10) + 1000 (exact match bonus) - (depth * 5)
+   * frequency = title_count + body_count per matched term.
+   */
+  searchByRelevance(
+    query: string,
+    limit = 20,
+  ): Array<{
+    url: string;
+    origin_url: string;
+    depth: number;
+    frequency: number;
+    relevance_score: number;
+    title: string;
+  }> {
+    const tokens = query
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((t) => t.length > 1);
+
+    if (tokens.length === 0) return [];
+
+    const placeholders = tokens.map(() => '?').join(',');
+
+    return this.db
+      .prepare(
+        `
+        SELECT
+          u.url,
+          u.origin_url,
+          u.depth,
+          u.title,
+          SUM(t.title_count + t.body_count) AS frequency,
+          SUM((t.title_count + t.body_count) * 10 + 1000) - (u.depth * 5) AS relevance_score
+        FROM terms t
+        JOIN urls u ON u.id = t.url_id
+        WHERE t.term IN (${placeholders})
+          AND u.status = 'completed'
+        GROUP BY t.url_id
+        ORDER BY relevance_score DESC
+        LIMIT ?
+      `,
+      )
+      .all(...tokens, limit) as Array<{
+      url: string;
+      origin_url: string;
+      depth: number;
+      frequency: number;
+      relevance_score: number;
+      title: string;
+    }>;
+  }
+
+  /**
+   * Export the full inverted index as flat text for data/storage/p.data.
+   * Each line: word url origin depth frequency
+   */
+  exportTermsFlat(): Array<{
+    term: string;
+    url: string;
+    origin_url: string;
+    depth: number;
+    frequency: number;
+  }> {
+    return this.db
+      .prepare(
+        `
+        SELECT
+          t.term,
+          u.url,
+          u.origin_url,
+          u.depth,
+          (t.title_count + t.body_count) AS frequency
+        FROM terms t
+        JOIN urls u ON u.id = t.url_id
+        WHERE u.status = 'completed'
+        ORDER BY t.term, u.url
+      `,
+      )
+      .all() as Array<{
+      term: string;
+      url: string;
+      origin_url: string;
+      depth: number;
+      frequency: number;
+    }>;
+  }
+
   getRawDb(): Database.Database {
     return this.db;
   }
