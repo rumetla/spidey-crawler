@@ -22,6 +22,7 @@ export interface JobRow {
   max_depth: number;
   max_workers: number;
   max_queue_size: number;
+  same_domain: number;
   status: JobStatus;
   created_at: string;
   updated_at: string;
@@ -55,6 +56,7 @@ export interface CreateJobDto {
   maxDepth: number;
   maxWorkers?: number;
   maxQueueSize?: number;
+  sameDomain?: boolean;
 }
 
 export interface SearchResultDto {
@@ -77,6 +79,7 @@ export interface WorkerTask {
 export interface WorkerResult {
   type: 'result';
   url: string;
+  finalUrl: string;
   title: string;
   bodyText: string;
   links: string[];

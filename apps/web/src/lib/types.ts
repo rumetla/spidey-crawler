@@ -6,6 +6,7 @@ export interface CrawlJob {
   max_depth: number;
   max_workers: number;
   max_queue_size: number;
+  same_domain: number;
   status: 'running' | 'paused' | 'completed' | 'cancelled';
   created_at: string;
   updated_at: string;
@@ -30,6 +31,7 @@ export interface CreateJobRequest {
   maxDepth: number;
   maxWorkers?: number;
   maxQueueSize?: number;
+  sameDomain?: boolean;
 }
 
 export interface CreateJobResponse {
@@ -68,8 +70,13 @@ export interface LogEvent {
   timestamp: number;
 }
 
+export interface JobStatusEvent {
+  jobId: number;
+  status: 'completed' | 'cancelled';
+}
+
 export interface SSEEvent {
   type: 'metrics' | 'url_processed' | 'backpressure' | 'job_status' | 'log';
-  data: MetricsEvent | UrlProcessedEvent | BackPressureEvent | LogEvent | Record<string, unknown>;
+  data: MetricsEvent | UrlProcessedEvent | BackPressureEvent | LogEvent | JobStatusEvent | Record<string, unknown>;
   timestamp: number;
 }

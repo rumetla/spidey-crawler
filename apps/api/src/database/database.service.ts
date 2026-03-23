@@ -70,12 +70,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     maxDepth: number,
     maxWorkers: number,
     maxQueueSize: number,
+    sameDomain: boolean,
   ): JobRow {
     const stmt = this.db.prepare(`
-      INSERT INTO jobs (origin_url, max_depth, max_workers, max_queue_size)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO jobs (origin_url, max_depth, max_workers, max_queue_size, same_domain)
+      VALUES (?, ?, ?, ?, ?)
     `);
-    const info = stmt.run(originUrl, maxDepth, maxWorkers, maxQueueSize);
+    const info = stmt.run(originUrl, maxDepth, maxWorkers, maxQueueSize, sameDomain ? 1 : 0);
     return this.getJob(info.lastInsertRowid as number)!;
   }
 
@@ -83,6 +84,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.db
       .prepare(`SELECT * FROM jobs WHERE id = ?`)
       .get(id) as JobRow | undefined;
+  }
+
+  getRunningJobs(): JobRow[] {
+    return this.db
+      .prepare(`SELECT * FROM jobs WHERE status = ?`)
+      .all(JobStatus.Running) as JobRow[];
   }
 
   updateJobStatus(id: number, status: JobStatus): void {
@@ -162,6 +169,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     this.db
       .prepare(`UPDATE urls SET status = ?, processed_at = datetime('now') WHERE id = ?`)
       .run(UrlStatus.Failed, urlId);
+  }
+
+  unclaimUrl(urlId: number): void {
+    this.db
+      .prepare(`UPDATE urls SET status = ? WHERE id = ? AND status = ?`)
+      .run(UrlStatus.Pending, urlId, UrlStatus.Processing);
   }
 
   // ── Metrics Queries ──

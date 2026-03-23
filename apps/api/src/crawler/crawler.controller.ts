@@ -39,9 +39,22 @@ export class CrawlerController {
       dto.maxDepth ?? 2,
       dto.maxWorkers ?? 4,
       dto.maxQueueSize ?? 1000,
+      dto.sameDomain ?? false,
     );
 
     return { jobId: job.id, status: job.status };
+  }
+
+  @Sse('events')
+  events(): Observable<MessageEvent> {
+    return this.sse.subscribe().pipe(
+      map((event: SSEEvent) => {
+        return {
+          data: JSON.stringify(event),
+          type: event.type,
+        } as MessageEvent;
+      }),
+    );
   }
 
   @Get(':id')
@@ -57,18 +70,5 @@ export class CrawlerController {
   cancelJob(@Param('id', ParseIntPipe) id: number) {
     this.crawler.cancelJob(id);
     return { cancelled: true };
-  }
-
-  /** SSE endpoint for real-time crawler events */
-  @Sse('events')
-  events(): Observable<MessageEvent> {
-    return this.sse.subscribe().pipe(
-      map((event: SSEEvent) => {
-        return {
-          data: JSON.stringify(event),
-          type: event.type,
-        } as MessageEvent;
-      }),
-    );
   }
 }

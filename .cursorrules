@@ -1,0 +1,37 @@
+# Spidey Crawler — Project Conventions
+
+## Stack
+- **Monorepo:** pnpm workspaces (`apps/api`, `apps/web`)
+- **Backend:** Nest.js 11, TypeScript (strict), better-sqlite3, worker_threads
+- **Frontend:** Next.js 15 (App Router), React 19, Tailwind CSS v4
+- **Real-time:** Server-Sent Events (SSE) via RxJS Subject
+
+## Key Constraints
+- No external scraping/parsing libraries (no Cheerio, jsdom, Puppeteer, Scrapy)
+- Native `fetch` + regex for HTML parsing
+- SQLite only (WAL mode) — no external DB servers
+- Single-machine concurrency via `worker_threads`
+
+## Code Style
+- TypeScript strict mode in both apps
+- Nest.js conventions: modules, services, controllers, dependency injection
+- Shared types in `apps/api/src/common/interfaces.ts` — frontend mirrors in `apps/web/src/lib/types.ts`
+- No comments that just narrate what code does — only explain non-obvious intent or trade-offs
+- Prefer `const` over `let`; avoid `any`
+
+## Architecture Rules
+- URLs are marked visited **on enqueue** (INSERT with UNIQUE constraint), not after fetch
+- Back pressure: skip enqueuing new links when queue exceeds ceiling (never stop processing)
+- Worker threads are ephemeral — one per URL, terminate after task
+- SSE events flow: CrawlerService → SSEService (RxJS Subject) → CrawlerController (@Sse) → Frontend (EventSource)
+- Database operations are synchronous (better-sqlite3) — no async/await needed for DB calls
+
+## File Layout
+- Backend source: `apps/api/src/`
+- Frontend source: `apps/web/src/`
+- SQL schema: `apps/api/src/database/schema.sql` (copied to dist via nest-cli assets)
+- Worker thread: `apps/api/src/crawler/worker/crawler.worker.ts`
+
+## Running
+- `pnpm dev` — starts both API (:3001) and web (:3000)
+- Next.js rewrites `/api/*` to `localhost:3001` — frontend never calls :3001 directly

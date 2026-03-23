@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   max_depth INTEGER NOT NULL,
   max_workers INTEGER NOT NULL DEFAULT 4,
   max_queue_size INTEGER NOT NULL DEFAULT 1000,
+  same_domain INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'running'
     CHECK(status IN ('running', 'paused', 'completed', 'cancelled')),
   created_at TEXT NOT NULL DEFAULT (datetime('now')),

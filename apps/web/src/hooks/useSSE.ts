@@ -6,6 +6,7 @@ import type {
   MetricsEvent,
   UrlProcessedEvent,
   LogEvent,
+  JobStatusEvent,
 } from '@/lib/types';
 
 const MAX_LOG_ENTRIES = 200;
@@ -14,6 +15,7 @@ export interface CrawlerState {
   metrics: MetricsEvent;
   recentUrls: UrlProcessedEvent[];
   logs: LogEvent[];
+  jobStatus: JobStatusEvent | null;
   connected: boolean;
 }
 
@@ -29,6 +31,7 @@ export function useSSE(): CrawlerState {
   const [metrics, setMetrics] = useState<MetricsEvent>(DEFAULT_METRICS);
   const [recentUrls, setRecentUrls] = useState<UrlProcessedEvent[]>([]);
   const [logs, setLogs] = useState<LogEvent[]>([]);
+  const [jobStatus, setJobStatus] = useState<JobStatusEvent | null>(null);
   const [connected, setConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -50,6 +53,17 @@ export function useSSE(): CrawlerState {
             [event.data as LogEvent, ...prev].slice(0, MAX_LOG_ENTRIES),
           );
           break;
+        case 'job_status':
+          setJobStatus(event.data as JobStatusEvent);
+          break;
+        case 'backpressure':
+          setLogs((prev) =>
+            [
+              { level: 'warn' as const, message: `Back pressure active — queue depth ${(event.data as Record<string, unknown>).queueDepth}`, timestamp: event.timestamp },
+              ...prev,
+            ].slice(0, MAX_LOG_ENTRIES),
+          );
+          break;
       }
     } catch {
       // Malformed SSE data — ignore
@@ -69,7 +83,6 @@ export function useSSE(): CrawlerState {
     es.addEventListener('backpressure', (e) => handleEvent(e.data));
     es.addEventListener('job_status', (e) => handleEvent(e.data));
 
-    // Fallback for unnamed events
     es.onmessage = (e) => handleEvent(e.data);
 
     return () => {
@@ -78,5 +91,5 @@ export function useSSE(): CrawlerState {
     };
   }, [handleEvent]);
 
-  return { metrics, recentUrls, logs, connected };
+  return { metrics, recentUrls, logs, jobStatus, connected };
 }

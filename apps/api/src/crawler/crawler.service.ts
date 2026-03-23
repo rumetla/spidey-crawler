@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Worker } from 'worker_threads';
 import * as path from 'path';
 import { DatabaseService } from '../database/database.service';
@@ -13,27 +13,55 @@ import {
 } from '../common/interfaces';
 import { buildTermFrequencies } from './worker/html-parser';
 
+const RATE_LIMIT_MS = 200;
+const METRICS_INTERVAL_MS = 500;
+const WORKER_TIMEOUT_MS = 15_000;
+const ROLLING_WINDOW_MS = 30_000;
+
 @Injectable()
-export class CrawlerService {
+export class CrawlerService implements OnModuleInit {
   private readonly logger = new Logger(CrawlerService.name);
-  private activeJobs = new Map<number, { workers: Worker[]; interval: NodeJS.Timeout }>();
+  private activeJobs = new Map<number, { interval: NodeJS.Timeout }>();
+  private completionTimestamps: number[] = [];
+  private domainLastHit = new Map<string, number>();
+  private effectiveDomain = new Map<number, string>();
 
   constructor(
     private readonly db: DatabaseService,
     private readonly sse: SSEService,
   ) {}
 
-  /** Launch a new crawl job */
+  onModuleInit(): void {
+    setTimeout(() => this.resumeRunningJobs(), 1000);
+  }
+
+  private resumeRunningJobs(): void {
+    const runningJobs = this.db.getRunningJobs();
+    for (const job of runningJobs) {
+      const pending = this.db.getQueueDepth(job.id);
+      if (pending > 0) {
+        this.logger.log(
+          `Resuming job #${job.id} (${job.origin_url}) — ${pending} URLs pending`,
+        );
+        this.sse.log('info', `Resuming crawl job #${job.id}: ${job.origin_url}`);
+        this.runCrawlLoop(job);
+      } else {
+        this.db.updateJobStatus(job.id, JobStatus.Completed);
+        this.logger.log(`Job #${job.id} had no pending URLs — marked completed`);
+      }
+    }
+  }
+
   startJob(
     originUrl: string,
     maxDepth: number,
     maxWorkers = 4,
     maxQueueSize = 1000,
+    sameDomain = false,
   ): JobRow {
-    const job = this.db.createJob(originUrl, maxDepth, maxWorkers, maxQueueSize);
-    this.logger.log(`Job ${job.id} created: ${originUrl} (depth=${maxDepth})`);
+    const job = this.db.createJob(originUrl, maxDepth, maxWorkers, maxQueueSize, sameDomain);
+    this.logger.log(`Job ${job.id} created: ${originUrl} (depth=${maxDepth}, sameDomain=${sameDomain})`);
 
-    // Enqueue the seed URL at depth 0 — marked visited immediately
     this.db.enqueueUrl(job.id, originUrl, originUrl, 0);
 
     this.sse.log('info', `Crawl job #${job.id} started: ${originUrl}`);
@@ -42,84 +70,78 @@ export class CrawlerService {
     return job;
   }
 
-  /** Main BFS crawl loop — spins up workers and feeds them URLs */
   private runCrawlLoop(job: JobRow): void {
-    const workers: Worker[] = [];
     let activeWorkerCount = 0;
     let isThrottled = false;
 
     const metricsInterval = setInterval(() => {
       this.emitMetrics(job.id, activeWorkerCount, isThrottled);
-    }, 500);
+    }, METRICS_INTERVAL_MS);
 
-    this.activeJobs.set(job.id, { workers, interval: metricsInterval });
+    this.activeJobs.set(job.id, { interval: metricsInterval });
 
     const processNext = (): void => {
-      const currentJob = this.db.getJob(job.id);
-      if (!currentJob || currentJob.status !== JobStatus.Running) {
-        this.cleanupJob(job.id);
-        return;
-      }
-
-      const queueDepth = this.db.getQueueDepth(job.id);
-
-      // Back pressure: throttle if queue is too deep or too many workers
-      if (activeWorkerCount >= job.max_workers) {
-        isThrottled = true;
-        setTimeout(processNext, 100);
-        return;
-      }
-
-      isThrottled = queueDepth > job.max_queue_size;
-      if (isThrottled) {
-        this.sse.emit('backpressure', {
-          isThrottled: true,
-          queueDepth,
-          maxQueueSize: job.max_queue_size,
-          activeWorkers: activeWorkerCount,
-          maxWorkers: job.max_workers,
-        });
-        setTimeout(processNext, 200);
-        return;
-      }
-
-      // Claim a batch of pending URLs
-      const batch = this.db.claimPendingUrls(job.id, 1);
-
-      if (batch.length === 0) {
-        // No pending URLs and no active workers → job complete
-        if (activeWorkerCount === 0) {
-          this.db.updateJobStatus(job.id, JobStatus.Completed);
-          this.sse.log('info', `Job #${job.id} completed`);
-          this.sse.emit('job_status', { jobId: job.id, status: 'completed' });
+      try {
+        const currentJob = this.db.getJob(job.id);
+        if (!currentJob || currentJob.status !== JobStatus.Running) {
           this.cleanupJob(job.id);
           return;
         }
-        // Workers still active — wait for them
-        setTimeout(processNext, 100);
-        return;
-      }
 
-      const urlRow = batch[0];
-      activeWorkerCount++;
+        if (activeWorkerCount >= job.max_workers) {
+          setTimeout(processNext, 100);
+          return;
+        }
 
-      this.spawnWorker(urlRow, job, () => {
-        activeWorkerCount--;
-        // Immediately try to process more
+        const queueDepth = this.db.getQueueDepth(job.id);
+        isThrottled = queueDepth > job.max_queue_size;
+
+        const batch = this.db.claimPendingUrls(job.id, 1);
+
+        if (batch.length === 0) {
+          if (activeWorkerCount === 0) {
+            this.db.updateJobStatus(job.id, JobStatus.Completed);
+            this.sse.log('info', `Job #${job.id} completed`);
+            this.sse.emit('job_status', { jobId: job.id, status: 'completed' });
+            this.cleanupJob(job.id);
+            return;
+          }
+          setTimeout(processNext, 100);
+          return;
+        }
+
+        const urlRow = batch[0];
+
+        const delay = this.getRateLimitDelay(urlRow.url);
+        if (delay > 0) {
+          this.db.unclaimUrl(urlRow.id);
+          setTimeout(processNext, delay);
+          return;
+        }
+
+        this.markDomainHit(urlRow.url);
+        activeWorkerCount++;
+
+        this.spawnWorker(urlRow, job, activeWorkerCount, () => {
+          activeWorkerCount--;
+          this.recordCompletion();
+          setImmediate(processNext);
+        });
+
         setImmediate(processNext);
-      });
-
-      // Kick off next URL processing without waiting
-      setImmediate(processNext);
+      } catch (err) {
+        this.logger.warn(`processNext error (retrying): ${(err as Error).message}`);
+        setTimeout(processNext, 500);
+      }
     };
 
     processNext();
   }
 
-  /** Spawn a worker thread to fetch and parse a single URL */
   private spawnWorker(
     urlRow: UrlRow,
     job: JobRow,
+    currentActiveWorkers: number,
     onComplete: () => void,
   ): void {
     const workerPath = path.resolve(__dirname, 'worker', 'crawler.worker.js');
@@ -137,36 +159,29 @@ export class CrawlerService {
       this.db.markUrlFailed(urlRow.id);
       this.sse.log('warn', `Timeout: ${urlRow.url}`);
       onComplete();
-    }, 15_000);
+    }, WORKER_TIMEOUT_MS);
 
     worker.on('message', (msg: WorkerMessage) => {
       clearTimeout(timeout);
 
       if (msg.type === 'result') {
+        if (job.same_domain && msg.finalUrl && !this.effectiveDomain.has(job.id)) {
+          try {
+            const domain = this.extractRootDomain(new URL(msg.finalUrl).hostname);
+            this.effectiveDomain.set(job.id, domain);
+            this.logger.log(`Job #${job.id} effective domain: ${domain} (from ${msg.finalUrl})`);
+          } catch { /* keep using origin */ }
+        }
+
         this.db.markUrlCompleted(urlRow.id, msg.title, msg.bodyText);
 
-        // Build and store inverted index
         const terms = buildTermFrequencies(msg.title, msg.bodyText);
         if (terms.size > 0) {
           this.db.indexTerms(urlRow.id, terms);
         }
 
-        // Enqueue discovered links (only if within depth limit)
         if (urlRow.depth < job.max_depth) {
-          let enqueued = 0;
-          for (const link of msg.links) {
-            // Visited-on-enqueue: prevents race conditions across workers
-            const isNew = this.db.enqueueUrl(
-              job.id,
-              link,
-              job.origin_url,
-              urlRow.depth + 1,
-            );
-            if (isNew) enqueued++;
-          }
-          if (enqueued > 0) {
-            this.sse.log('info', `+${enqueued} links from ${urlRow.url}`);
-          }
+          this.enqueueDiscoveredLinks(msg.links, urlRow, job, currentActiveWorkers);
         }
 
         this.sse.emit('url_processed', {
@@ -194,6 +209,106 @@ export class CrawlerService {
     worker.postMessage(task);
   }
 
+  private enqueueDiscoveredLinks(
+    links: string[],
+    urlRow: UrlRow,
+    job: JobRow,
+    activeWorkers: number,
+  ): void {
+    const currentQueueDepth = this.db.getQueueDepth(job.id);
+    if (currentQueueDepth > job.max_queue_size) {
+      this.sse.emit('backpressure', {
+        isThrottled: true,
+        queueDepth: currentQueueDepth,
+        maxQueueSize: job.max_queue_size,
+        activeWorkers,
+        maxWorkers: job.max_workers,
+      });
+      return;
+    }
+
+    let originDomain: string | undefined;
+    if (job.same_domain) {
+      originDomain = this.effectiveDomain.get(job.id);
+      if (!originDomain) {
+        try {
+          originDomain = this.extractRootDomain(new URL(job.origin_url).hostname);
+        } catch { /* fall through — enqueue all */ }
+      }
+    }
+
+    let enqueued = 0;
+    for (const link of links) {
+      if (originDomain) {
+        try {
+          if (this.extractRootDomain(new URL(link).hostname) !== originDomain) continue;
+        } catch { continue; }
+      }
+
+      const isNew = this.db.enqueueUrl(
+        job.id,
+        link,
+        job.origin_url,
+        urlRow.depth + 1,
+      );
+      if (isNew) enqueued++;
+    }
+    if (enqueued > 0) {
+      this.sse.log('info', `+${enqueued} links from ${urlRow.url}`);
+    }
+  }
+
+  /**
+   * Extract the registrable root domain from a hostname.
+   * "en.wikipedia.org" → "wikipedia.org"
+   * "www.example.com"  → "example.com"
+   * "blog.news.co.uk"  → "news.co.uk"
+   */
+  private extractRootDomain(hostname: string): string {
+    const parts = hostname.split('.');
+    if (parts.length <= 2) return hostname;
+    const ccSlds = ['co', 'com', 'org', 'net', 'ac', 'gov', 'edu'];
+    if (parts.length >= 3 && ccSlds.includes(parts[parts.length - 2])) {
+      return parts.slice(-3).join('.');
+    }
+    return parts.slice(-2).join('.');
+  }
+
+  // --- Rate limiting ---
+
+  private getRateLimitDelay(url: string): number {
+    try {
+      const hostname = new URL(url).hostname;
+      const lastHit = this.domainLastHit.get(hostname);
+      if (!lastHit) return 0;
+      const elapsed = Date.now() - lastHit;
+      return elapsed < RATE_LIMIT_MS ? RATE_LIMIT_MS - elapsed : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private markDomainHit(url: string): void {
+    try {
+      this.domainLastHit.set(new URL(url).hostname, Date.now());
+    } catch { /* ignore malformed URLs */ }
+  }
+
+  // --- Throughput tracking ---
+
+  private recordCompletion(): void {
+    this.completionTimestamps.push(Date.now());
+  }
+
+  private getPagesPerSecond(): number {
+    const now = Date.now();
+    const cutoff = now - ROLLING_WINDOW_MS;
+    this.completionTimestamps = this.completionTimestamps.filter((t) => t > cutoff);
+    if (this.completionTimestamps.length === 0) return 0;
+    const windowSec = (now - this.completionTimestamps[0]) / 1000;
+    return windowSec > 0 ? this.completionTimestamps.length / windowSec : 0;
+  }
+
   private emitMetrics(
     jobId: number,
     activeWorkers: number,
@@ -204,7 +319,7 @@ export class CrawlerService {
       queueDepth: this.db.getQueueDepth(jobId),
       activeWorkers,
       isThrottled,
-      pagesPerSecond: 0, // TODO: calculate rolling average
+      pagesPerSecond: Math.round(this.getPagesPerSecond() * 10) / 10,
     };
     this.sse.emit('metrics', metrics);
   }
@@ -213,16 +328,16 @@ export class CrawlerService {
     const entry = this.activeJobs.get(jobId);
     if (entry) {
       clearInterval(entry.interval);
-      entry.workers.forEach((w) => w.terminate());
       this.activeJobs.delete(jobId);
     }
+    this.effectiveDomain.delete(jobId);
   }
 
-  /** Cancel a running job */
   cancelJob(jobId: number): void {
     this.db.updateJobStatus(jobId, JobStatus.Cancelled);
     this.cleanupJob(jobId);
     this.sse.log('info', `Job #${jobId} cancelled`);
+    this.sse.emit('job_status', { jobId, status: 'cancelled' });
   }
 
   getJob(jobId: number): JobRow | undefined {

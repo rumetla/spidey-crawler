@@ -43,11 +43,13 @@ parentPort.on('message', async (task: WorkerTask) => {
     }
 
     const html = await response.text();
-    const parsed = parsePage(html, task.url);
+    const finalUrl = response.url || task.url;
+    const parsed = parsePage(html, finalUrl);
 
     parentPort!.postMessage({
       type: 'result',
       url: task.url,
+      finalUrl,
       title: parsed.title,
       bodyText: parsed.bodyText,
       links: parsed.links,
